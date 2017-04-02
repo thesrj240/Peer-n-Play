@@ -9,6 +9,8 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <wait.h>
+#include <netinet/in.h>
+#include <netinet/sctp.h>
 #include "stream.h"
 #define MAXPENDING 10
 #define BUFFER_SIZE 1024
@@ -39,7 +41,7 @@ int main(int argc, char *argv[])
     echoServPort = atoi(argv[1]);  
 
     
-    if ((servSock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0){
+    if ((servSock = socket(AF_INET, SOCK_STREAM, IPPROTO_SCTP)) < 0){
         perror("Socket");
         exit(1);
     }
@@ -69,8 +71,14 @@ int main(int argc, char *argv[])
         if(fork()==0){
             streamRequest request;
             printf("\nReady to READ\n");
-            if(recv(clntSock,&request,sizeof(request),0) < 0){
+            int recv_count;
+            recv_count = sctp_recv(clntSock,&request,sizeof(request),0);
+            if( recv_count < 0){
                 perror("Request");
+                exit(1);
+            }
+            if(recv_count == 0){
+                printf("Connection Closed\n");
                 exit(1);
             }
             // printf("HERE1\n");
@@ -89,8 +97,8 @@ int main(int argc, char *argv[])
                 perror("Seek");
             }
             int read_count,send_count;
-        
-            while(1){
+            int count_1 = 500;
+            while(count_1--){
                 //sleep(1);
                 read_count = fread(buffer,1,BUFFER_SIZE,fd);
                // printf("read: %d\n",read_count);
@@ -105,7 +113,7 @@ int main(int argc, char *argv[])
 
                 }
                 else{
-                    send_count = send(clntSock,buffer,read_count,0);
+                    send_count = sctp_send(clntSock,buffer,read_count,0);
                     //printf("sent: %d\n",send_count);
                     //fflush(stdout);
                     if(send_count<0){
@@ -123,7 +131,7 @@ int main(int argc, char *argv[])
             close(clntSock);
         }
         else{
-            //close(clntSock);
+            close(clntSock);
         }
 
 
