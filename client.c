@@ -5,62 +5,69 @@
 #include <string.h>     
 #include <unistd.h>
 #include <wait.h>
+#include <ifaddrs.h>
 #include <netinet/in.h>
-#include <netinet/sctp.h>
+#include <net/if.h>
+#include <dirent.h>
+#include <pthread.h>
 #include "stream.h"
-#define BUFFER_SIZE 1024
 
-int main(int argc,char** argv){
-	if(argc!=4){
-		printf("Wrong no. of arguments\n");
-		exit(1);
-	}
-	int sock,sock2;                        
-    struct sockaddr_in echoServAddr; 
-    unsigned short echoServPort;     
-    char *servIP;                    
-    char *echoString;                
-    char buffer[BUFFER_SIZE];     
-    //unsigned int echoStringLen;      
-    int bytesRcvd, totalBytesRcvd;
-    servIP = argv[1]; 
-    echoServPort = atoi(argv[2]);
-    if ((sock = socket(AF_INET, SOCK_STREAM, IPPROTO_SCTP)) < 0){
+
+int getServingPeerListFromServer(endPoint *servingPeerEP,char fileName[]){
+	// endPoint myEndPoint;
+	// strcpy(myEndPoint.addr,myIP);
+	// myEndPoint.port = myPort;
+	//puts(fileName);
+	struct sockaddr_in serverAddr; 
+    int senderSock;
+	if ((senderSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0){
         perror("socket() failed");
-        exit(1);
+        return -1;
+    }	
+	memset(&serverAddr, 0, sizeof(serverAddr));
+    serverAddr.sin_family      = AF_INET;                     
+    serverAddr.sin_addr.s_addr = inet_addr(SERVER_IP);   
+    serverAddr.sin_port        = htons(SERVER_PORT);
+    if(connect(senderSock, (struct sockaddr *) &serverAddr, sizeof(serverAddr)) < 0){
+        perror("connect() failed");
+        return -1;
+        //exit(1);
+    }
+    if (send(senderSock,fileName,sizeof(char)*MAXFILENAME,0) < 0){
+    	perror("Send");
+    }
+    int isPresent=0;
+
+    socketReceive(senderSock, &isPresent, sizeof(isPresent));
+
+    if(isPresent==1){
+    	socketReceive(senderSock, servingPeerEP, sizeof(endPoint));    	
+    	return 0;
     }
 
-    
-    memset(&echoServAddr, 0, sizeof(echoServAddr));     
+    return -1;
+}
 
-    echoServAddr.sin_family      = AF_INET;                     
-    echoServAddr.sin_addr.s_addr = inet_addr(servIP);   
-    echoServAddr.sin_port        = htons(echoServPort); 
-
-    if (connect(sock, (struct sockaddr *) &echoServAddr, sizeof(echoServAddr)) < 0){
-        perror("connect1() failed");
-        exit(1);
-    }
-
-    //----
-    echoServPort = atoi(argv[3]);
-    if ((sock2 = socket(PF_INET, SOCK_STREAM, IPPROTO_SCTP)) < 0){
+int getStreamFromPeer(char fileName[], endPoint ep){
+	
+	struct sockaddr_in peerAddr; 
+    int peerSocket;
+    if ((peerSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0){
         perror("socket() failed");
-        exit(1);
+        return -1;
     }
-
     
-    memset(&echoServAddr, 0, sizeof(echoServAddr));     
-
-    echoServAddr.sin_family      = AF_INET;                     
-    echoServAddr.sin_addr.s_addr = inet_addr(servIP);   
-    echoServAddr.sin_port        = htons(echoServPort); 
-
-    if (connect(sock2, (struct sockaddr *) &echoServAddr, sizeof(echoServAddr)) < 0){
-        perror("connect2() failed");
-        exit(1);
+    memset(&peerAddr, 0, sizeof(peerAddr));
+    peerAddr.sin_family      = AF_INET;                     
+    peerAddr.sin_addr.s_addr = inet_addr(ep.addr);   
+    peerAddr.sin_port        = htons(ep.port);
+    if(connect(peerSocket, (struct sockaddr *) &peerAddr, sizeof(peerAddr)) < 0){
+        perror("connect() failed");
+        return -1;
+        //exit(1);
     }
-    //----
+    char buffer[BUFFER_SIZE];
+	int bytesRcvd, totalBytesRcvd;
     int p[2];
     pipe(p);
     pid_t child_pid;
@@ -75,7 +82,7 @@ int main(int argc,char** argv){
     }
     else{
     	int long total_received = 0;
-    	int abnormal_close = 0;
+    	// int abnormal_close = 0;
     	int sent;
     	close(p[0]);
     	//streamRequest request;
@@ -83,15 +90,15 @@ int main(int argc,char** argv){
     	request.offset = 0;
     	//request.offset = 1000000/4;
     	
-    	strcpy(request.fileName,"thesong.mp3");
+    	strcpy(request.fileName,fileName);
     	printf("\nSENDING\n");
-    	sent = sctp_send(sock,&request,sizeof(request),0);
+    	sent = send(peerSocket,&request,sizeof(request),0);
     	if(sent < 0 ){
     		perror("Request");
     	}
     	printf("\nSENT:%d\n",sent);
     	while(1){
-	    	bytesRcvd = sctp_recv(sock,buffer,BUFFER_SIZE-1,0);
+	    	bytesRcvd = recv(peerSocket,buffer,BUFFER_SIZE-1,0);
 
 	    	// printf("read: %d\n",bytesRcvd);
       //       fflush(stdout);
@@ -102,7 +109,7 @@ int main(int argc,char** argv){
 	    	}
 	    	else if(bytesRcvd==0){
 	    		printf("Connection Closed\n");
-	    		abnormal_close = 1;
+	    		//abnormal_close = 1;
 	    		break;
 	    	}
 	    	else{
@@ -113,46 +120,41 @@ int main(int argc,char** argv){
 				total_received+=bytesRcvd;
 	    	}
 	    }
-	    if(abnormal_close==1){
-	    	printf("\nSERVER DOWN\n");
-	    	request.offset = total_received;
-	    	//request.offset = 1000000/4;
-	    	
-	    	strcpy(request.fileName,"thesong.mp3");
-	    	printf("\nSENDING\n");
-	    	sent = sctp_send(sock2,&request,sizeof(request),0);
-	    	if(sent < 0 ){
-	    		perror("Request");
-	    	}
-	    	printf("\nSENT:%d\n",sent);
-	    	while(1){
-		    	bytesRcvd = sctp_recv(sock2,buffer,BUFFER_SIZE-1,0);
-
-		    	// printf("read: %d\n",bytesRcvd);
-	      //       fflush(stdout);
-		    	if(bytesRcvd<0){
-		    		perror("Recv");
-		    		//close(p[1]);
-		    		break;
-		    	}
-		    	else if(bytesRcvd==0){
-		    		printf("Connection Closed\n");
-		    		abnormal_close = 1;
-		    		break;
-		    	}
-		    	else{
-		    		if(write(p[1],buffer,bytesRcvd) <0){
-						perror("Write");
-						break;
-					}
-					total_received+=bytesRcvd;
-		    	}
-		    }
-	    }
-	    close(p[1]);
+    	close(p[1]);
 	    waitpid(child_pid,NULL,0);
     }
 
+	return 0;
+}
 
-    return 1;
+int clientProcess(void){
+	char fileName[MAXFILENAME];
+	printf("Enter file name\n");
+	fgets(fileName,MAXFILENAME,stdin);
+	int i;
+	for(i=0;i<MAXFILENAME;i++){
+		if(fileName[i]=='\n'){
+			fileName[i] = '\0';
+			break;			
+		}
+	}
+	
+	//gets(fileName);
+	endPoint servingPeerEP;
+	int isPresent = getServingPeerListFromServer(&servingPeerEP,fileName);
+	if(isPresent==-1){
+		printf("Not Present\n");
+	}
+	else{
+		printf("%s\t%hu\n",servingPeerEP.addr, servingPeerEP.port);
+	}
+	getStreamFromPeer(fileName,servingPeerEP);
+
+	return 0;
+}
+
+
+int main(int argc,char **argv){
+	clientProcess();
+	return 0;
 }

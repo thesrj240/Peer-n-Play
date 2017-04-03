@@ -16,8 +16,12 @@
 pthread_mutex_t mutexPeerInfoList;
 
 //**********test remove peer******************//
+//**********Handle absence of file in client***********//
 peerInfo peerInfoList[MAXPEER];
 
+void child_handler(int signo){
+    while(waitpid(-1,NULL,WNOHANG));
+}
 void printPeers(){
 	int i,j;
 	for(i=0;i<MAXPEER;i++){
@@ -534,6 +538,7 @@ int servingPeerServingClientRequest(int clntSock){
 }
 
 int servingPeerProcess(void){
+    signal(SIGCHLD,child_handler);
     int listenSocket;                    
     int clientSocket;                    
     struct sockaddr_in listenAddr; 

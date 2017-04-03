@@ -3,140 +3,215 @@
 #include <arpa/inet.h>  
 #include <stdlib.h>     
 #include <string.h>     
-#include <unistd.h> 
-#include <signal.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <fcntl.h>
+#include <unistd.h>
 #include <wait.h>
+#include <ifaddrs.h>
 #include <netinet/in.h>
-#include <netinet/sctp.h>
+#include <net/if.h>
+#include <dirent.h>
+#include <pthread.h>
 #include "stream.h"
-#define MAXPENDING 10
-#define BUFFER_SIZE 1024
 
-void child_handler(int signo){
-    while(waitpid(-1,NULL,WNOHANG));
+
+pthread_mutex_t mutexPeerInfoList;
+peerInfo peerInfoList[MAXPEER];
+
+void printPeers(){
+	int i,j;
+	for(i=0;i<MAXPEER;i++){
+		if(peerInfoList[i].peerID != -1){
+			printf("ID:%d\tIP:%s\tPort:%hu\t \n",peerInfoList[i].peerID,peerInfoList[i].ep.addr,peerInfoList[i].ep.port);
+			for(j=0;j<peerInfoList[i].numFiles;j++){
+				puts(peerInfoList[i].fileList[j]);
+			}
+		}
+	}
+}
+	
+int initializePeerInfoList(){
+	int i;
+	pthread_mutex_lock (&mutexPeerInfoList);
+	for(i=0;i<MAXPEER;i++){
+		peerInfoList[i].peerID = -1;
+		peerInfoList[i].fileList = NULL;
+		peerInfoList[i].numFiles = -1;
+	}
+	pthread_mutex_unlock (&mutexPeerInfoList);
+	return 0;
+}
+int addPeer(char ip[],unsigned short port, char **fileList,int numFiles){
+	int i;
+	pthread_mutex_lock (&mutexPeerInfoList);
+
+	for(i=0;i<MAXPEER;i++){
+		if(peerInfoList[i].peerID == -1){
+			peerInfoList[i].peerID = i;
+			peerInfoList[i].ep.port = port;
+			strcpy(peerInfoList[i].ep.addr,ip);
+			peerInfoList[i].numFiles = numFiles;
+			peerInfoList[i].fileList = fileList;
+			pthread_mutex_unlock (&mutexPeerInfoList);
+			return i;
+		}
+	}
+	pthread_mutex_unlock (&mutexPeerInfoList);
+	return -1;
 }
 
-int main(int argc, char *argv[])
-{
-    signal(SIGCHLD,child_handler);
-    FILE *fd;
-    char buffer[BUFFER_SIZE+1];
-    int servSock;                    
-    int clntSock;                    
-    struct sockaddr_in echoServAddr; 
-    struct sockaddr_in echoClntAddr; 
-    unsigned short echoServPort;     
-    unsigned int clntLen;  
-    clntLen = sizeof(echoClntAddr);          
+int removePeer(int peerID){	//like yield, no guarantees here, untested ok please
+	int i;
+	pthread_mutex_lock (&mutexPeerInfoList);
+	if(peerInfoList[peerID].peerID==peerID){
+		peerInfoList[peerID].peerID = -1;
+		for(i=0;i<peerInfoList[peerID].numFiles;i++){
+			free(peerInfoList[peerID].fileList[i]);
+		}
+		free(peerInfoList[peerID].fileList);
+		peerInfoList[peerID].fileList = NULL;
+		peerInfoList[peerID].numFiles = -1;
+		pthread_mutex_unlock (&mutexPeerInfoList);
+		return peerID;
+	}
+	else{
+		pthread_mutex_unlock (&mutexPeerInfoList);
+		return -1;
+	}
+}
 
-    if (argc != 2)     
-    {
-        fprintf(stderr, "Usage:  %s <Server Port>\n", argv[0]);
-        exit(1);
-    }
-
-    echoServPort = atoi(argv[1]);  
-
-    
-    if ((servSock = socket(AF_INET, SOCK_STREAM, IPPROTO_SCTP)) < 0){
+void* serverProcessNewPeer(void* dummy){
+	initializePeerInfoList();
+	int newPeerSocket;                    
+    int clientSocket;                    
+    struct sockaddr_in newPeerSockAddr; 
+    struct sockaddr_in clientAddr;
+    socklen_t clientAddrLength = sizeof(clientAddr);
+    memset(&newPeerSockAddr, 0, sizeof(newPeerSockAddr));
+    newPeerSockAddr.sin_family = AF_INET;
+    newPeerSockAddr.sin_addr.s_addr = inet_addr(SERVER_IP);	 
+    newPeerSockAddr.sin_port = htons(SERVER_NEW_CONNECT_PORT);    				
+    endPoint ep;
+    if ((newPeerSocket = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0){
         perror("Socket");
-        exit(1);
+        //exit(1);
     }
-      
-    
-    memset(&echoServAddr, 0, sizeof(echoServAddr));   
-
-    echoServAddr.sin_family = AF_INET;                    
-
-    echoServAddr.sin_addr.s_addr = htonl(INADDR_ANY); 
-    echoServAddr.sin_port = htons(echoServPort);      
-
-    
-    if (bind(servSock, (struct sockaddr *) &echoServAddr, sizeof(echoServAddr)) < 0){
+    if (bind(newPeerSocket, (struct sockaddr *) &newPeerSockAddr, sizeof(newPeerSockAddr)) < 0){
         perror("bind() failed");
     }
-
     
-    if (listen(servSock, MAXPENDING) < 0){
+    if (listen(newPeerSocket, MAXPENDING) < 0){
         perror("listen() failed");
     }
     while(1){
-        if ((clntSock = accept(servSock, (struct sockaddr *) &echoClntAddr, &clntLen)) < 0){
+    	if ((clientSocket = accept(newPeerSocket, (struct sockaddr *) &clientAddr, &clientAddrLength)) < 0){
             perror("accept() failed");
         }
-        
-        if(fork()==0){
-            streamRequest request;
-            printf("\nReady to READ\n");
-            int recv_count;
-            recv_count = sctp_recv(clntSock,&request,sizeof(request),0);
-            if( recv_count < 0){
-                perror("Request");
-                exit(1);
-            }
-            if(recv_count == 0){
-                printf("Connection Closed\n");
-                exit(1);
-            }
-            // printf("HERE1\n");
-            // strcpy(request.fileName,"thesong.mp3");
-            // printf("HERE");
-            // request.offset = 0;
-            printf("Request: %s %ld\n",request.fileName,request.offset);
-            fflush(stdout);
-            fd = fopen(request.fileName,"rb");
-
-            if(fd==NULL){
-                perror("File Open");
-                exit(1);
-            }
-            if (fseek(fd,request.offset,SEEK_SET) == -1){
-                perror("Seek");
-            }
-            int read_count,send_count;
-            int count_1 = 500;
-            while(count_1--){
-                //sleep(1);
-                read_count = fread(buffer,1,BUFFER_SIZE,fd);
-               // printf("read: %d\n",read_count);
-              //  fflush(stdout);
-                if(read_count<0){
-                    perror("Read");
-                    break;
-                }
-                else if(read_count==0){
-                    
-                    break;
-
-                }
-                else{
-                    send_count = sctp_send(clntSock,buffer,read_count,0);
-                    //printf("sent: %d\n",send_count);
-                    //fflush(stdout);
-                    if(send_count<0){
-                        perror("Send:");
-                        break;
-                    }
-                    if(send_count!=read_count){
-                        perror("Send not same as read");
-                    }
-
-                    
-                }
-            }
-            fclose(fd);
-            close(clntSock);
-        }
-        else{
-            close(clntSock);
-        }
+        socketReceive(clientSocket,&ep,sizeof(ep));
+	    printf("Server:%s %hu\n",ep.addr,ep.port);
+	
+	//char **fileList=NULL;
+		char fileName[MAXFILENAME];
+		int numFiles=0,i;
+		socketReceive(clientSocket,&numFiles,sizeof(numFiles));
+		printf("Num:Files:%d\n",numFiles);
+		char **fileList;
+		fileList = (char**)malloc(sizeof(char*)*numFiles);
+		for(i=0;i<numFiles;i++){
+			fileList[i] = (char*)malloc(sizeof(char)*MAXFILENAME);
+			socketReceive(clientSocket,fileName, sizeof(fileName));
+			strcpy(fileList[i],fileName);
+			//puts(fileName);
+		}
+		if(addPeer(ep.addr,ep.port,fileList,numFiles) < 0){
+			printf("Can't Add More Peers\n");
+			for(i=0;i<numFiles;i++){
+				free(fileList[i]);
+			}
+			free(fileList);
 
 
+		}
+		fileList = NULL;
+		close(clientSocket);
+		printPeers();
 
-  
+	}
+	return NULL;
+}
+
+int searchForFile(char fileName[], endPoint* ep){
+	int i;
+	pthread_mutex_lock (&mutexPeerInfoList);
+	for(i=0;i<MAXPEER;i++){
+		if(peerInfoList[i].peerID!=-1){
+			int j;
+			for(j=0;j<peerInfoList[i].numFiles;j++){
+				if(strcmp(fileName,peerInfoList[i].fileList[j])==0){
+					ep->port = peerInfoList[i].ep.port;
+					strcpy(ep->addr,peerInfoList[i].ep.addr);
+					pthread_mutex_unlock (&mutexPeerInfoList);
+					return 1;
+				}
+			}
+		}
+	}
+	pthread_mutex_unlock (&mutexPeerInfoList);
+	return -1;
+}
+
+void* serverProcessClientRequest(void* dummy){
+	int listenSocket;                    
+    int clientSocket;                    
+    struct sockaddr_in listenAddr; 
+    struct sockaddr_in clientAddr;
+    socklen_t clientAddrLength = sizeof(clientAddr);
+    memset(&listenAddr, 0, sizeof(listenAddr));
+    listenAddr.sin_family = AF_INET;
+    listenAddr.sin_addr.s_addr = inet_addr(SERVER_IP);	 
+    listenAddr.sin_port = htons(SERVER_PORT);
+	if ((listenSocket = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0){
+        perror("Socket");
+        //exit(1);
     }
+    if (bind(listenSocket, (struct sockaddr *) &listenAddr, sizeof(listenAddr)) < 0){
+        perror("bind() failed");
+    }
+    
+    if (listen(listenSocket, MAXPENDING) < 0){
+        perror("listen() failed");
+    }
+    while(1){
+    	if ((clientSocket = accept(listenSocket, (struct sockaddr *) &clientAddr, &clientAddrLength)) < 0){
+            perror("accept() failed");
+        }
+        char fileName[MAXFILENAME];
+        socketReceive(clientSocket,fileName,MAXFILENAME*sizeof(char));
+        endPoint selectedServingPeer;
+        int isPresent;
+        printf("Requested %s\n",fileName);
+        isPresent = searchForFile(fileName,&selectedServingPeer);
+        
+        if(send(clientSocket,&isPresent,sizeof(isPresent),0) < 0){
+    		perror("Send");
+    	}
 
+    	if(isPresent==1){
+    		if(send(clientSocket,&selectedServingPeer,sizeof(selectedServingPeer),0) < 0){
+    			perror("Send");
+    		}
+    	}
+    	close(clientSocket);
+    }
+    return NULL;
+}
+
+int main(int argc,char **argv){
+
+	pthread_mutex_init(&mutexPeerInfoList, NULL);
+	pthread_t ptid1,ptid2;
+	pthread_create(&ptid1,NULL,serverProcessNewPeer,NULL);
+	pthread_create(&ptid2,NULL,serverProcessClientRequest,NULL);
+	pthread_join(ptid1,NULL);
+	pthread_mutex_destroy(&mutexPeerInfoList);
+	
+	return 0;
 }

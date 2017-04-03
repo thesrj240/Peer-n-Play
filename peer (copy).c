@@ -11,15 +11,17 @@
 #include <dirent.h>
 #include <pthread.h>
 #include "stream.h"
-#define BUFFER_SIZE 1024
-#define MAXPENDING 10
-#define MAXFILENAME 40
+
 
 pthread_mutex_t mutexPeerInfoList;
 
 //**********test remove peer******************//
+//**********Handle absence of file in client***********//
 peerInfo peerInfoList[MAXPEER];
 
+void child_handler(int signo){
+    while(waitpid(-1,NULL,WNOHANG));
+}
 void printPeers(){
 	int i,j;
 	for(i=0;i<MAXPEER;i++){
@@ -178,7 +180,6 @@ int sendToServer(char myIP[20],unsigned short myPort){
     }
 
 	return 0;
-
 }
 
 int socketReceive(int clientSocket, void* buffer, size_t receiveSize){
@@ -357,6 +358,85 @@ int getServingPeerListFromServer(endPoint *servingPeerEP,char fileName[]){
     return -1;
 }
 
+int getStreamFromPeer(char fileName[], endPoint ep){
+	
+	struct sockaddr_in peerAddr; 
+    int peerSocket;
+    if ((peerSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0){
+        perror("socket() failed");
+        return -1;
+    }
+    
+    memset(&peerAddr, 0, sizeof(peerAddr));
+    peerAddr.sin_family      = AF_INET;                     
+    peerAddr.sin_addr.s_addr = inet_addr(ep.addr);   
+    peerAddr.sin_port        = htons(ep.port);
+    if(connect(peerSocket, (struct sockaddr *) &peerAddr, sizeof(peerAddr)) < 0){
+        perror("connect() failed");
+        return -1;
+        //exit(1);
+    }
+    char buffer[BUFFER_SIZE];
+	int bytesRcvd, totalBytesRcvd;
+    int p[2];
+    pipe(p);
+    pid_t child_pid;
+    child_pid = fork();
+    if(child_pid==0){
+    	close(p[1]);
+    	close(0);
+    	dup(p[0]);
+    	execlp("mpg123","mpg123","-",NULL);
+    	perror("execp");
+    	exit(1);
+    }
+    else{
+    	int long total_received = 0;
+    	// int abnormal_close = 0;
+    	int sent;
+    	close(p[0]);
+    	//streamRequest request;
+    	streamRequest request;
+    	request.offset = 0;
+    	//request.offset = 1000000/4;
+    	
+    	strcpy(request.fileName,fileName);
+    	printf("\nSENDING\n");
+    	sent = send(peerSocket,&request,sizeof(request),0);
+    	if(sent < 0 ){
+    		perror("Request");
+    	}
+    	printf("\nSENT:%d\n",sent);
+    	while(1){
+	    	bytesRcvd = recv(peerSocket,buffer,BUFFER_SIZE-1,0);
+
+	    	// printf("read: %d\n",bytesRcvd);
+      //       fflush(stdout);
+	    	if(bytesRcvd<0){
+	    		perror("Recv");
+	    		//close(p[1]);
+	    		break;
+	    	}
+	    	else if(bytesRcvd==0){
+	    		printf("Connection Closed\n");
+	    		//abnormal_close = 1;
+	    		break;
+	    	}
+	    	else{
+	    		if(write(p[1],buffer,bytesRcvd) <0){
+					perror("Write");
+					break;
+				}
+				total_received+=bytesRcvd;
+	    	}
+	    }
+    	close(p[1]);
+	    waitpid(child_pid,NULL,0);
+    }
+
+	return 0;
+}
+
 int clientProcess(void){
 	char fileName[MAXFILENAME];
 	printf("Enter file name\n");
@@ -378,10 +458,87 @@ int clientProcess(void){
 	else{
 		printf("%s\t%hu\n",servingPeerEP.addr, servingPeerEP.port);
 	}
+	getStreamFromPeer(fileName,servingPeerEP);
+
+
+
+	return 0;
+}
+
+int servingPeerServingClientRequest(int clntSock){
+	char buffer[BUFFER_SIZE+1];
+	FILE *fd;
+    streamRequest request;
+    printf("\nReady to READ\n");
+    int recv_count;
+    recv_count = recv(clntSock,&request,sizeof(request),0);
+    if( recv_count < 0){
+        perror("Request");
+        exit(1);
+    }
+    if(recv_count == 0){
+        printf("Connection Closed\n");
+        exit(1);
+    }
+    // printf("HERE1\n");
+    // strcpy(request.fileName,"thesong.mp3");
+    // printf("HERE");
+    // request.offset = 0;
+    printf("Request: %s %ld\n",request.fileName,request.offset);
+    fflush(stdout);
+    char path_to_file[MAXFILENAME + 100];
+    strcpy(path_to_file,"audio/");
+    strcat(path_to_file,request.fileName);
+
+    fd = fopen(path_to_file,"rb");
+
+    if(fd==NULL){
+        perror("File Open");
+        exit(1);
+    }
+    if (fseek(fd,request.offset,SEEK_SET) == -1){
+        perror("Seek");
+    }
+    int read_count,send_count;
+    //int count_1 = 500;
+    while(1){
+        //sleep(1);
+        read_count = fread(buffer,1,BUFFER_SIZE,fd);
+       // printf("read: %d\n",read_count);
+      //  fflush(stdout);
+        if(read_count<0){
+            perror("Read");
+            break;
+        }
+        else if(read_count==0){
+            
+            break;
+
+        }
+        else{
+            send_count = send(clntSock,buffer,read_count,0);
+            //printf("sent: %d\n",send_count);
+            //fflush(stdout);
+            if(send_count<0){
+                perror("Send:");
+                break;
+            }
+            if(send_count!=read_count){
+                perror("Send not same as read");
+            }
+
+            
+        }
+    }
+    fclose(fd);
+    close(clntSock);
+        
+    
 	return 0;
 }
 
 int servingPeerProcess(void){
+    signal(SIGCHLD,child_handler);
     int listenSocket;                    
     int clientSocket;                    
     struct sockaddr_in listenAddr; 
@@ -390,8 +547,8 @@ int servingPeerProcess(void){
     socklen_t lenMyAddr = sizeof(myAddr);
     char ownIP[20];
     //unsigned short echoServPort;     
-    //unsigned int clientAddrLength;  
-    //clntLen = sizeof(echoClntAddr);
+    unsigned int clientAddrLength;  
+    clientAddrLength = sizeof(clientAddr);
     if(getOwnIP(ownIP) < 0){
     	printf("getOwnIP Error\n");
     	return -1;
@@ -399,13 +556,13 @@ int servingPeerProcess(void){
 
     memset(&listenAddr, 0, sizeof(listenAddr));
     listenAddr.sin_family = AF_INET;
-    listenAddr.sin_addr.s_addr = inet_addr(ownIP);	//chenge this later 
+    listenAddr.sin_addr.s_addr = inet_addr(ownIP);	 
     listenAddr.sin_port = htons(0);    				//kernel gives unique port itself
 
     if ((listenSocket = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0){
         perror("Socket");
         exit(1);
-    }
+    }	//socket on which this serving peer would serve the client
     if (bind(listenSocket, (struct sockaddr *) &listenAddr, sizeof(listenAddr)) < 0){
         perror("bind() failed");
     }
@@ -417,9 +574,24 @@ int servingPeerProcess(void){
     if(getsockname(listenSocket,(struct sockaddr *)&myAddr,&lenMyAddr) < 0){
     	perror("getsockname");
     }
-    sendToServer(inet_ntoa(myAddr.sin_addr),ntohs(myAddr.sin_port));    
+    sendToServer(inet_ntoa(myAddr.sin_addr),ntohs(myAddr.sin_port));
+    //above function is telling the server on which port it will serve the client
     printf("Serving Peer:%s %d\n",inet_ntoa(myAddr.sin_addr),ntohs(myAddr.sin_port));
     // sleep(100);
+    while(1){
+        if ((clientSocket = accept(listenSocket, (struct sockaddr *) &clientAddr, &clientAddrLength)) < 0){
+            perror("accept() failed");
+        }
+        
+        if(fork()==0){
+        	servingPeerServingClientRequest(clientSocket);
+        	exit(0);
+        }
+        else{
+        	close(clientSocket);
+        }
+	}
+
     return 0;
 }
 
